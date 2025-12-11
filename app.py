@@ -22,7 +22,15 @@ if DATABASE.startswith('sqlite'):
     DB_PATH = 'users.db'
 else:
     # Для PostgreSQL на Railway
-    import psycopg2
+    try:
+        import psycopg2
+    except ImportError:
+        # Fallback на psycopg (psycopg3) если psycopg2 не установлен
+        try:
+            import psycopg
+            psycopg2 = psycopg
+        except ImportError:
+            raise ImportError("Необходимо установить psycopg2-binary или psycopg")
     from urllib.parse import urlparse
     DB_PATH = DATABASE
 
@@ -108,12 +116,32 @@ def hash_password(password):
 
 def verify_password(password, password_hash):
     """Проверяет пароль"""
+    if not password_hash:
+        return False
+    
     try:
         import bcrypt
-        return bcrypt.checkpw(password.encode('utf-8'), password_hash.encode('utf-8'))
+        # Проверяем, является ли хеш bcrypt (начинается с $2a$, $2b$ или $2y$)
+        if password_hash.startswith('$2'):
+            # Это bcrypt хеш
+            try:
+                # bcrypt.checkpw требует bytes для обоих аргументов
+                return bcrypt.checkpw(password.encode('utf-8'), password_hash.encode('utf-8'))
+            except (ValueError, TypeError) as e:
+                # Если ошибка при проверке bcrypt, пробуем SHA256
+                return hashlib.sha256(password.encode()).hexdigest() == password_hash
+        else:
+            # Это SHA256 хеш (fallback)
+            return hashlib.sha256(password.encode()).hexdigest() == password_hash
     except ImportError:
-        # Fallback на SHA256
+        # Fallback на SHA256 если bcrypt не установлен
         return hashlib.sha256(password.encode()).hexdigest() == password_hash
+    except Exception as e:
+        # В случае любой другой ошибки пробуем SHA256
+        try:
+            return hashlib.sha256(password.encode()).hexdigest() == password_hash
+        except:
+            return False
 
 def verify_admin(username, password):
     """Безопасная проверка админских прав"""
@@ -187,6 +215,25 @@ def check_subscription(username):
     return False
 
 # API Endpoints
+
+@app.route('/', methods=['GET'])
+def root():
+    """Корневой маршрут для проверки работы сервера"""
+    return jsonify({
+        'status': 'ok',
+        'message': 'Owners Hack API Server',
+        'version': '1.0.0',
+        'endpoints': [
+            '/api/register',
+            '/api/login',
+            '/api/check_subscription',
+            '/api/health',
+            '/api/admin/users',
+            '/api/admin/ban',
+            '/api/admin/subscription',
+            '/api/admin/password'
+        ]
+    })
 
 @app.route('/api/register', methods=['POST'])
 def register():
@@ -523,8 +570,14 @@ def admin_get_password():
 def health():
     return jsonify({'status': 'ok'})
 
-if __name__ == '__main__':
+# Инициализация БД при импорте (для gunicorn)
+try:
     init_db()
+except Exception as e:
+    print(f"Warning: Database initialization failed: {e}")
+
+if __name__ == '__main__':
+    # Для локального запуска
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
 
